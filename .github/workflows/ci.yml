@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: ruff / mypy --strict / pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Sync dependencies
+        run: uv sync --locked --python 3.12
+
+      - name: Lint (ruff)
+        run: uv run ruff check src tests
+
+      - name: Type-check (mypy --strict)
+        run: uv run mypy src
+
+      # The whole suite is offline by construction: the policy engine is pure,
+      # the audit log is embedded SQLite, and the gateway is exercised through a
+      # recording transport rather than a real MCP server.
+      - name: Test (pytest)
+        run: uv run pytest
