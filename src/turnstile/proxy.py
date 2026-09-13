@@ -27,6 +27,7 @@ import sys
 from collections.abc import Iterable
 from typing import Any, TextIO
 
+from .approvals import ApprovalStore
 from .audit import AuditLog
 from .budget import Budget, BudgetLedger
 from .domain import Principal
@@ -81,6 +82,7 @@ class Proxy:
         principal: Principal,
         budget: Budget | None = None,
         ledger: BudgetLedger | None = None,
+        approvals: ApprovalStore | None = None,
     ) -> None:
         self._registry = registry
         self._policy = policy
@@ -91,6 +93,7 @@ class Proxy:
             audit_log=audit_log,
             budget=budget,
             ledger=ledger,
+            approvals=approvals,
         )
 
     # -- the loop ---------------------------------------------------------

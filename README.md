@@ -165,6 +165,109 @@ never shown a tool it would only be refused for using. A tool that is *condition
 appears, because argument predicates cannot be judged without arguments, and hiding it would deny a
 capability that is legal for some inputs.
 
+## Who the agent is acting for
+
+An agent must never hold more authority than the person it acts for — and usually holds less.
+
+Every company already has an identity provider that knows who is in which group, so Turnstile
+authenticates nobody itself. It verifies a signed OIDC token, maps the groups inside it onto the
+scopes its rules select on, and hands the result to the policy engine as a principal.
+
+```json
+"identity": {
+  "settings": { "algorithms": ["RS256"], "issuer": "https://login.example.com/acme", "audience": "turnstile" },
+  "roles": {
+    "base_scopes": ["read"],
+    "groups": {
+      "support-leads": ["tickets"],
+      "finance":       ["ledger"],
+      "directors":     ["ledger", "approve", "write"]
+    }
+  }
+}
+```
+
+Three real people, three real signed tokens, **one unchanged policy**:
+
+```text
+--- as priya (groups: support-leads) ---
+  tools visible : ['fin.read_file']
+  delete_file   : BLOCKED
+--- as sam (groups: finance) ---
+  tools visible : ['fin.read_file']
+  delete_file   : BLOCKED
+--- as dana (groups: directors) ---
+  tools visible : ['fin.read_file', 'fin.delete_file']
+  delete_file   : ALLOWED
+```
+
+Two properties are enforced in code rather than left to configuration:
+
+- **The signature is always verified.** There is no flag that disables it, and `alg: none` cannot
+  even be configured — it is signature stripping, not an algorithm. Expiry, audience and issuer are
+  named explicitly rather than left to library defaults, so a future default change cannot quietly
+  switch one off.
+- **An unmapped group grants nothing.** Default deny applied to identity: creating a group at the
+  IdP is never accidentally a grant inside Turnstile.
+
+`turnstile whoami` exists because the commonest identity failure is not a rejected token but an
+accepted one that yields fewer scopes than expected — which looks exactly like a policy bug until
+you can see the mapping:
+
+```json
+{ "principal": { "subject": "sam", "scopes": ["ledger", "read"] },
+  "groups_presented": ["finance", "mystery-team"],
+  "groups_unmapped":  ["mystery-team"] }
+```
+
+Credentials come from the environment (`TURNSTILE_JWT_KEY`, `TURNSTILE_ID_TOKEN`), never from the
+config file — and on stdio that is what the specification points at, since the transport carries no
+authorization of its own. If identity is configured and the token is missing or invalid, the
+gateway **refuses to start** rather than falling back to the config-file principal. Falling back
+would mean granting access on the strength of a file instead of an identity provider, which is the
+exact failure this layer exists to prevent.
+
+## Holding a call for a human
+
+A `require_approval` decision parks the call and returns an approval id. Four rules keep an
+approval narrow, and each closes a way it could become more authority than the approver intended:
+
+- **Bound to the exact call** — one server, one tool, one specific set of arguments, matched by
+  digest. Approving `delete /tmp/scratch` must never authorise `delete /etc/passwd`.
+- **Single use** — consumed the moment the call proceeds, so one approved deletion does not
+  authorise unlimited deletions.
+- **Expires** — a request approved on Monday should not still execute on Friday.
+- **The requester cannot approve themselves** — and this one matters here specifically, because the
+  requester is usually an agent acting *as* a human. Without it, "ask a human" collapses into the
+  agent asking itself.
+
+The audit log then records `approval:<id>` and the approver's name as the reason the call was
+permitted — not a policy rule, because a rule is not what permitted it.
+
+## Testing a policy change before shipping it
+
+Nobody should learn what a new rule does by enabling it in production.
+
+```bash
+turnstile shadow --config turnstile.json --candidate stricter-policy.json
+```
+
+```text
+Evaluated 431 audited call(s) against the candidate policy.
+  unchanged:     403
+  newly denied:  26
+  newly held:    2
+  newly allowed: 0
+  unevaluable:   3 (a rule reads an argument that redaction removed from the record)
+```
+
+That last line is the honest part. Audit records store arguments *after* redaction, so a rule
+matching on a redacted path cannot be scored against history — the value it needs was deliberately
+never written down. Reporting those as unevaluable rather than assuming an answer is the difference
+between a report an operator can act on and one that misleads them exactly once, expensively.
+Scopes are likewise absent from audit records, so a candidate rule selecting on `require_scopes`
+will not score faithfully; that limit is stated here rather than papered over.
+
 ## The rule that breaks proxies
 
 **stdout carries MCP messages and nothing else.** The specification states it as a MUST NOT, and
@@ -191,21 +294,24 @@ real server.
 ## Status and scope
 
 Implemented and tested: the policy engine, the hash-chained audit log, budgets, the gateway
-decision path, and the **stdio transport** with multi-server aggregation, prefix routing, protocol
-version negotiation and notification passthrough.
+decision path, the **stdio transport** with multi-server aggregation and prefix routing,
+**OIDC identity with group-to-scope mapping**, the **approval flow**, and **shadow mode**.
 
-**Not yet built**: the Streamable HTTP transport; the approval queue that resolves a
-`REQUIRE_APPROVAL` hold; identity-provider integration so roles come from OIDC/SAML groups rather
-than a config file; shadow mode for testing a policy against recorded traffic; and session replay.
+**Not yet built**, and honestly out of scope for a portfolio slice rather than forgotten:
 
-A `REQUIRE_APPROVAL` decision currently holds the call and records it as awaiting a human, but
-there is no mechanism yet to deliver that approval. The natural fit is MCP's own
-`InputRequiredResult` and elicitation — the gateway asking the operator through the protocol it is
-already speaking.
+- **The Streamable HTTP transport.** stdio is what Claude Desktop and Claude Code use, so it is
+  what makes this demonstrable; HTTP is what a shared multi-user deployment would need, along with
+  the authorization framework that comes with it.
+- **Approval delivery through the protocol.** Approvals are granted out of band today. The natural
+  fit is MCP's own `InputRequiredResult` and elicitation — the gateway asking the operator through
+  the protocol it is already speaking — rather than a separate channel.
+- **A durable approval queue.** Deliberately in-memory: a persisted queue needs a defined lifetime
+  and reset policy, and choosing one silently would mean approvals behaving differently after a
+  restart than before it.
+- **Anchoring the audit head digest** somewhere the writer cannot reach, which is what would make
+  the log tamper-*proof* rather than tamper-evident.
 
-`principal` is configured rather than authenticated. On stdio that is defensible — the transport
-has no authorization framework, and the specification directs stdio implementations to take
-credentials from the environment — but it means this is not yet a multi-user system. Deriving the
-principal from a real identity provider changes that field's source, not its meaning.
+Not a production system, and not a security boundary against an attacker who controls the host: a
+policy file, a verification key and an audit database all live somewhere that host can reach.
 
 Not a production system, and not a security boundary against an attacker who controls the host.

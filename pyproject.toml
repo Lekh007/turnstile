@@ -7,6 +7,7 @@ authors = [{ name = "Lekhraj Kasar", email = "kasarlekhraj@gmail.com" }]
 requires-python = ">=3.12"
 dependencies = [
     "pydantic>=2.12.0",
+    "pyjwt>=2.10.0",
 ]
 
 [project.scripts]

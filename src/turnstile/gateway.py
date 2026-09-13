@@ -25,7 +25,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from .audit import AuditLog
+from .approvals import ApprovalStore
+from .audit import AuditLog, redact
 from .budget import Budget, BudgetLedger
 from .domain import Decision, Effect, Outcome, Principal, ToolCall
 from .mcp import MalformedRequest, denial_response, error_response, parse_tool_call, text_result
@@ -68,11 +69,13 @@ class Gateway:
         audit_log: AuditLog,
         budget: Budget | None = None,
         ledger: BudgetLedger | None = None,
+        approvals: ApprovalStore | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._policy = policy
         self._transport = transport
         self._audit = audit_log
+        self._approvals = approvals
         self._budget = budget
         self._ledger = ledger if ledger is not None else BudgetLedger()
         self._clock = clock
@@ -113,21 +116,39 @@ class Gateway:
             )
 
         if decision.effect is Effect.REQUIRE_APPROVAL:
-            # Held, not forwarded. The call has been recorded as awaiting a
-            # human; nothing reaches the upstream server until one arrives.
-            self._record(call, decision, Outcome.AWAITING_APPROVAL)
-            return GatewayResult(
-                response={
-                    "jsonrpc": "2.0",
-                    "id": request_id,
-                    "result": text_result(
-                        f"Held for approval by Turnstile policy [{decision.rule_id}]: {decision.reason}",
-                        is_error=True,
-                    ),
-                },
-                decision=decision,
-                outcome=Outcome.AWAITING_APPROVAL,
-                audited=True,
+            # An approval granted earlier for *this exact call* turns the hold
+            # into a pass, and is spent doing so. Checked before the hold is
+            # recorded, so an approved retry does not queue a second request.
+            granted = self._approvals.consume(call) if self._approvals is not None else None
+            if granted is None:
+                self._record(call, decision, Outcome.AWAITING_APPROVAL)
+                pending_note = ""
+                if self._approvals is not None:
+                    pending = self._approvals.request(
+                        call, arguments_redacted=redact(call.arguments, self._policy.redact_paths)
+                    )
+                    pending_note = f" Approval id: {pending.id} (expires {pending.expires_at.isoformat()})."
+                return GatewayResult(
+                    response={
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "result": text_result(
+                            f"Held for approval by Turnstile policy [{decision.rule_id}]: "
+                            f"{decision.reason}{pending_note}",
+                            is_error=True,
+                        ),
+                    },
+                    decision=decision,
+                    outcome=Outcome.AWAITING_APPROVAL,
+                    audited=True,
+                )
+            # Re-label the decision so the audit log records *why* this call
+            # was permitted -- an approval by a named human, not a policy rule.
+            decision = Decision(
+                effect=Effect.ALLOW,
+                rule_id=f"approval:{granted.id}",
+                reason=f"approved by {granted.decided_by!r} at {granted.decided_at.isoformat() if granted.decided_at else 'unknown'}",
+                matched_index=decision.matched_index,
             )
 
         if self._budget is not None:
