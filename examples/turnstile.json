@@ -1,0 +1,51 @@
+{
+  "principal": {
+    "tenant": "acme",
+    "subject": "lekhraj",
+    "scopes": ["read"]
+  },
+  "audit_path": ".turnstile/audit.sqlite3",
+  "servers": {
+    "files": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp/turnstile-demo"]
+    }
+  },
+  "budget": {
+    "max_calls": 200,
+    "max_calls_per_tool": { "write_file": 10 }
+  },
+  "policy": {
+    "redact_paths": ["credentials.token", "headers.authorization"],
+    "rules": [
+      {
+        "id": "never-read-secrets",
+        "effect": "deny",
+        "description": "Dotfiles and key material are off limits to the agent regardless of who asked.",
+        "tools": ["read_file", "read_text_file"],
+        "arguments": [
+          { "path": "path", "operator": "regex", "value": "(?i)(\\.env|\\.ssh/|id_rsa|credentials)" }
+        ]
+      },
+      {
+        "id": "deletes-need-a-human",
+        "effect": "require_approval",
+        "description": "Deleting a file is held for review; agents do not delete unsupervised.",
+        "tools": ["delete_*", "move_file"]
+      },
+      {
+        "id": "reads-are-free",
+        "effect": "allow",
+        "description": "Read-only filesystem tools are unrestricted.",
+        "tools": ["read_*", "list_*", "search_*", "get_*", "directory_tree"]
+      },
+      {
+        "id": "writes-need-scope",
+        "effect": "allow",
+        "description": "Writing requires the 'write' scope.",
+        "tools": ["write_file", "create_directory", "edit_file"],
+        "require_scopes": ["write"]
+      }
+    ]
+  }
+}

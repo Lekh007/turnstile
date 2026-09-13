@@ -120,6 +120,60 @@ Built against the **2026-07-28** MCP revision, which matters in three specific w
   only be refused for using. It is not a security boundary on its own, so `tools/call` is
   evaluated against policy regardless of what `tools/list` returned.
 
+## Use it
+
+Turnstile runs as an MCP server over stdio. Point a client at it instead of at your real servers,
+and list those servers in its config:
+
+```json
+{
+  "principal": { "tenant": "acme", "subject": "you", "scopes": ["read"] },
+  "servers": {
+    "files": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp/demo"] }
+  },
+  "policy": {
+    "rules": [
+      { "id": "deletes-need-a-human", "effect": "require_approval", "tools": ["delete_*"] },
+      { "id": "reads-are-free", "effect": "allow", "tools": ["read_*", "list_*"] }
+    ]
+  }
+}
+```
+
+```bash
+python -m turnstile --config turnstile.json
+```
+
+A fuller example, with redaction, budgets and a scope-gated write rule, is in
+[`examples/turnstile.json`](examples/turnstile.json).
+
+Tools are exposed as `<server>.<tool>` — the specification asks aggregating proxies to
+disambiguate, since two servers may each expose a `search`. Routing splits on the *first* dot, so
+`admin.tools.list` (itself a legal tool name) survives being prefixed.
+
+Here is a real run against two rules, one allowing reads and one denying deletes:
+
+```text
+discover  -> ['2026-07-28']
+tools     -> ['files.read_file']
+call      -> ALLOWED: files:read_file:{"path": "/tmp/notes.txt"}
+call      -> BLOCKED: Refused by Turnstile policy [deletes-denied]: Agents do not delete files.
+```
+
+`files.delete_file` is absent from the tool list because policy denies it outright — the model is
+never shown a tool it would only be refused for using. A tool that is *conditionally* denied still
+appears, because argument predicates cannot be judged without arguments, and hiding it would deny a
+capability that is legal for some inputs.
+
+## The rule that breaks proxies
+
+**stdout carries MCP messages and nothing else.** The specification states it as a MUST NOT, and
+the failure is disproportionate: one stray banner, warning or traceback makes the client fail to
+parse the stream, and the error it reports points at JSON rather than at whatever printed. Every
+diagnostic here goes to stderr, which the spec explicitly permits and tells clients not to read as
+failure. A test drives the proxy through a scripted session — including a garbage input line — and
+asserts every single stdout line parses as a valid MCP message.
+
 ## Run the gates
 
 ```bash
@@ -129,16 +183,29 @@ uv run mypy src          # strict
 uv run pytest
 ```
 
+The transport tests spawn a real MCP server subprocess ([`tests/fixtures/fake_mcp_server.py`](tests/fixtures/fake_mcp_server.py))
+rather than mocking it, because framing, interleaved notifications, stderr tolerance and
+shutdown-on-EOF are invisible to a mock and are exactly what breaks the first time a proxy meets a
+real server.
+
 ## Status and scope
 
-An early vertical slice: the policy engine, the audit chain, budgets, and the gateway decision path
-are implemented and tested. **Not yet built**: the stdio and Streamable HTTP transports that carry
-it in front of a real client, the approval queue that resolves a `REQUIRE_APPROVAL` hold, shadow
-mode for testing a policy against recorded traffic, and session replay.
+Implemented and tested: the policy engine, the hash-chained audit log, budgets, the gateway
+decision path, and the **stdio transport** with multi-server aggregation, prefix routing, protocol
+version negotiation and notification passthrough.
 
-A `REQUIRE_APPROVAL` decision currently holds the call and records it as awaiting a human; there is
-no mechanism yet to deliver that approval. The natural fit is MCP's own `InputRequiredResult` and
-elicitation — the gateway asking the operator for approval through the protocol it is already
-speaking — which is the next thing to build.
+**Not yet built**: the Streamable HTTP transport; the approval queue that resolves a
+`REQUIRE_APPROVAL` hold; identity-provider integration so roles come from OIDC/SAML groups rather
+than a config file; shadow mode for testing a policy against recorded traffic; and session replay.
+
+A `REQUIRE_APPROVAL` decision currently holds the call and records it as awaiting a human, but
+there is no mechanism yet to deliver that approval. The natural fit is MCP's own
+`InputRequiredResult` and elicitation — the gateway asking the operator through the protocol it is
+already speaking.
+
+`principal` is configured rather than authenticated. On stdio that is defensible — the transport
+has no authorization framework, and the specification directs stdio implementations to take
+credentials from the environment — but it means this is not yet a multi-user system. Deriving the
+principal from a real identity provider changes that field's source, not its meaning.
 
 Not a production system, and not a security boundary against an attacker who controls the host.
