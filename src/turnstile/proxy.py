@@ -48,7 +48,6 @@ SUPPORTED_PROTOCOL_VERSIONS = ("2026-07-28",)
 SERVER_INFO = {"name": "turnstile", "version": "0.1.0"}
 
 METHOD_NOT_FOUND = -32601
-INTERNAL_ERROR = -32603
 UNSUPPORTED_PROTOCOL_VERSION = -32022
 """Defined by the specification (schema: UnsupportedProtocolVersionError), not invented here."""
 

@@ -51,6 +51,8 @@ class ShadowReport:
     unevaluable: list[int] = field(default_factory=list)
     """Sequences whose decision depends on an argument that redaction removed."""
     rule_hits: Counter[str] = field(default_factory=Counter)
+    candidate_rule_ids: tuple[str, ...] = ()
+    """Every rule in the candidate, so `unused_rules` can name the ones that never fired."""
 
     @property
     def changed(self) -> int:
@@ -58,8 +60,14 @@ class ShadowReport:
 
     @property
     def unused_rules(self) -> list[str]:
-        """Rules the candidate policy never matched. Usually dead, sometimes a typo."""
-        return []
+        """Rules the candidate never matched against this history.
+
+        Usually dead weight, occasionally a typo in a selector that makes an
+        operator think they are protected when they are not. Absence of traffic
+        is not proof a rule is wrong -- it may simply guard something nobody
+        tried this month -- so these are reported, not flagged.
+        """
+        return [rule_id for rule_id in self.candidate_rule_ids if self.rule_hits[rule_id] == 0]
 
     def summary(self) -> str:
         lines = [
@@ -69,6 +77,8 @@ class ShadowReport:
             f"  newly held:    {len(self.newly_held)}",
             f"  newly allowed: {len(self.newly_allowed)}",
         ]
+        if self.unused_rules:
+            lines.append(f"  unused rules:  {', '.join(self.unused_rules)}")
         if self.unevaluable:
             lines.append(
                 f"  unevaluable:   {len(self.unevaluable)} "
@@ -87,7 +97,7 @@ def replay(policy: Policy, records: Iterable[AuditRecord], *, current: Policy | 
     edited. Passing both is the honest comparison; the default is the
     convenient one.
     """
-    report = ShadowReport()
+    report = ShadowReport(candidate_rule_ids=tuple(rule.id for rule in policy.rules))
 
     for record in records:
         call = _reconstruct(record)

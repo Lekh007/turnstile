@@ -170,6 +170,14 @@ class TestRoleMapping:
         principal = resolver().resolve(token(groups=("directors",)))
         assert list(principal.scopes) == sorted(principal.scopes)
 
+    def test_explain_refuses_an_unverified_token(self) -> None:
+        # explain() must not become a way to read claims out of a token nobody
+        # verified. There is exactly one decode in the module and it verifies.
+        with pytest.raises(IdentityError):
+            resolver().explain(token(key=WRONG_SECRET))
+        with pytest.raises(IdentityError):
+            resolver().explain(token(expires_in=-60))
+
     def test_explain_surfaces_groups_the_mapping_ignores(self) -> None:
         # The commonest identity failure is an accepted token with fewer scopes
         # than expected, which looks exactly like a policy bug.

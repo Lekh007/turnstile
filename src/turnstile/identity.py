@@ -129,7 +129,15 @@ class TokenPrincipalResolver:
         self._settings = settings
         self._mapping = mapping
 
-    def resolve(self, credential: str | None) -> Principal:
+    def _verified_claims(self, credential: str | None) -> dict[str, Any]:
+        """Decode a token, verifying everything. The only decode in this module.
+
+        Deliberately the single entry point: an earlier version had `explain`
+        do its own `verify_signature: False` decode, which was safe only
+        because it happened to call `resolve` first. Safety that depends on the
+        order of two lines survives exactly until someone reorders them, so the
+        unverified decode is gone rather than commented.
+        """
         if not credential:
             raise IdentityError("no credential presented")
 
@@ -159,6 +167,11 @@ class TokenPrincipalResolver:
             # should never have been.
             raise IdentityError(f"token rejected: {type(exc).__name__}: {exc}") from exc
 
+        return claims
+
+    def resolve(self, credential: str | None) -> Principal:
+        claims = self._verified_claims(credential)
+
         subject = claims.get(self._settings.subject_claim)
         if not isinstance(subject, str) or not subject:
             raise IdentityError(f"token has no usable {self._settings.subject_claim!r} claim")
@@ -179,8 +192,8 @@ class TokenPrincipalResolver:
         but an accepted one that produced fewer scopes than expected, which
         looks exactly like a policy bug until someone can see the mapping.
         """
+        claims = self._verified_claims(credential)
         principal = self.resolve(credential)
-        claims = jwt.decode(credential or "", options={"verify_signature": False})
         groups = _string_list(claims.get(self._settings.groups_claim))
         return {
             "principal": principal.model_dump(),

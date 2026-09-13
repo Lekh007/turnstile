@@ -120,6 +120,37 @@ class TestReplay:
         assert report.rule_hits["never-matches"] == 0
 
 
+class TestUnusedRules:
+    def test_rules_that_never_fire_are_named(self) -> None:
+        # Occasionally a typo in a selector that makes an operator believe they
+        # are protected when they are not.
+        with AuditLog() as log:
+            record_call(log, "read_file")
+            candidate = Policy(
+                rules=(
+                    Rule(id="allow-reads", effect=Effect.ALLOW, tools=("read_*",)),
+                    Rule(id="typo-in-selector", effect=Effect.DENY, tools=("delte_*",)),
+                )
+            )
+            report = replay(candidate, log.records())
+        assert report.unused_rules == ["typo-in-selector"]
+        assert "typo-in-selector" in report.summary()
+
+    def test_no_unused_rules_when_all_fire(self) -> None:
+        with AuditLog() as log:
+            record_call(log, "read_file")
+            record_call(log, "delete_file")
+            candidate = Policy(
+                rules=(
+                    Rule(id="allow-reads", effect=Effect.ALLOW, tools=("read_*",)),
+                    Rule(id="deny-deletes", effect=Effect.DENY, tools=("delete_*",)),
+                )
+            )
+            report = replay(candidate, log.records())
+        assert report.unused_rules == []
+        assert "unused rules" not in report.summary()
+
+
 class TestRedactionHonesty:
     """The limitation that has to be reported rather than guessed around."""
 
