@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 from .approvals import ApprovalStore
-from .audit import AuditLog, ChainBroken
+from .audit import IN_MEMORY, AuditLog, AuditUnavailable, ChainBroken
 from .budget import BudgetLedger
 from .config import TurnstileConfig
 from .identity import IdentityError, TokenPrincipalResolver
@@ -122,7 +122,7 @@ def whoami(config: TurnstileConfig) -> int:
 
 def shadow(config: TurnstileConfig, candidate_path: Path) -> int:
     """Replay the audit log through a candidate policy and report the delta."""
-    if config.audit_path == ":memory:":
+    if config.audit_path == IN_MEMORY:
         log("[turnstile] audit_path is ':memory:', so there is no history to replay against")
         return 1
 
@@ -180,17 +180,23 @@ def main(argv: list[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
     config = _load(arguments.config)
 
-    match arguments.command:
-        case "whoami":
-            return whoami(config)
-        case "verify":
-            return verify(config)
-        case "shadow":
-            return shadow(config, arguments.candidate)
-        case _:
-            # Default to serve, so a client config that names no subcommand
-            # still launches the gateway.
-            return serve(config)
+    try:
+        match arguments.command:
+            case "whoami":
+                return whoami(config)
+            case "verify":
+                return verify(config)
+            case "shadow":
+                return shadow(config, arguments.candidate)
+            case _:
+                # Default to serve, so a client config that names no subcommand
+                # still launches the gateway.
+                return serve(config)
+    except AuditUnavailable as exc:
+        # A misconfigured audit_path is an operator mistake with a one-line fix,
+        # and a traceback would point at sqlite rather than at the setting.
+        print(f"turnstile: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

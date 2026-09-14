@@ -1,8 +1,17 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
-from turnstile.audit import GENESIS_DIGEST, AuditLog, ChainBroken, redact
+from turnstile.audit import (
+    GENESIS_DIGEST,
+    IN_MEMORY,
+    AuditLog,
+    AuditUnavailable,
+    ChainBroken,
+    redact,
+)
 from turnstile.domain import Decision, Effect, Outcome, Principal, ToolCall
 
 
@@ -133,3 +142,48 @@ class TestTenantIsolation:
             log.append(call=call(tenant="acme"), decision=ALLOWED, outcome=Outcome.COMPLETED)
             log.append(call=call(tenant="globex"), decision=ALLOWED, outcome=Outcome.COMPLETED)
             assert log.verify() == 2
+
+
+class TestOpeningTheLog:
+    """A clean clone must be able to run the documented command.
+
+    These exist because `pytest` was green while `turnstile --config
+    examples/turnstile.json verify` died with a raw sqlite traceback on a fresh
+    checkout: every test used the in-memory default, so no test ever opened a
+    file at a path whose directory did not exist yet.
+    """
+
+    def test_a_missing_parent_directory_is_created(self, tmp_path: Path) -> None:
+        path = tmp_path / "does" / "not" / "exist" / "audit.sqlite3"
+        assert not path.parent.exists()
+        with AuditLog(path) as log:
+            assert log.verify() == 0
+        assert path.exists()
+
+    def test_the_example_config_path_works_from_a_clean_checkout(self, tmp_path: Path) -> None:
+        # The exact shape shipped in examples/turnstile.json: a relative path
+        # under a dot-directory that a fresh clone does not contain.
+        path = tmp_path / ".turnstile" / "audit.sqlite3"
+        with AuditLog(path) as log:
+            log.append(call=call(), decision=ALLOWED, outcome=Outcome.COMPLETED)
+        with AuditLog(path) as reopened:
+            assert reopened.verify() == 1, "the chain must survive a reopen"
+
+    def test_in_memory_is_never_treated_as_a_filename(self, tmp_path: Path) -> None:
+        # Creating a ':memory:' directory on disk would be a silent, confusing
+        # side effect of the default configuration.
+        before = set(tmp_path.iterdir())
+        with AuditLog(IN_MEMORY) as log:
+            assert log.verify() == 0
+        assert set(tmp_path.iterdir()) == before
+
+    def test_an_unwritable_path_is_reported_against_the_setting(self, tmp_path: Path) -> None:
+        # A file where a directory needs to be: the operator gets the setting
+        # name and the remedy, not a sqlite error code.
+        blocker = tmp_path / "blocker"
+        blocker.write_text("not a directory")
+        with pytest.raises(AuditUnavailable) as caught:
+            AuditLog(blocker / "nested" / "audit.sqlite3")
+        message = str(caught.value)
+        assert "audit_path" in message
+        assert IN_MEMORY in message

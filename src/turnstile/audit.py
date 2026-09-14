@@ -29,6 +29,27 @@ GENESIS_DIGEST = "0" * 64
 
 REDACTED = "[redacted]"
 
+IN_MEMORY = ":memory:"
+"""SQLite's magic path for a non-durable log. Never treated as a filename."""
+
+
+class AuditUnavailable(Exception):
+    """The audit log could not be opened, so nothing may be forwarded.
+
+    A separate type rather than a bare OSError because of what the gateway does
+    with it: every decision is audited, so a log that cannot be written is a
+    refusal to serve, not a degraded mode. Catching `OSError` broadly at the
+    call site would also swallow unrelated I/O failures from the stdio loop.
+    """
+
+    def __init__(self, path: Path | str, reason: BaseException) -> None:
+        super().__init__(
+            f"cannot open the audit log at {str(path)!r}: {reason}. "
+            f"Point 'audit_path' at a writable location, or use {IN_MEMORY!r} "
+            "for a log that is not kept."
+        )
+        self.path = str(path)
+
 
 class ChainBroken(Exception):
     """Raised when the audit chain does not verify. Carries the failing sequence."""
@@ -123,10 +144,22 @@ class AuditLog:
     needs its own database cluster before it can log a refusal is not one anyone
     will deploy in front of a laptop agent."""
 
-    def __init__(self, path: Path | str = ":memory:") -> None:
-        self._connection = sqlite3.connect(str(path), isolation_level=None)
-        self._connection.row_factory = sqlite3.Row
-        self._connection.executescript(_SCHEMA)
+    def __init__(self, path: Path | str = IN_MEMORY) -> None:
+        if str(path) != IN_MEMORY:
+            # Create the directory the operator pointed us at. They asked for a
+            # durable log *here*; refusing because the containing folder does
+            # not exist yet turns a one-line config into a stack trace that
+            # names sqlite instead of the setting responsible.
+            try:
+                Path(path).parent.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise AuditUnavailable(path, exc) from exc
+        try:
+            self._connection = sqlite3.connect(str(path), isolation_level=None)
+            self._connection.row_factory = sqlite3.Row
+            self._connection.executescript(_SCHEMA)
+        except sqlite3.Error as exc:
+            raise AuditUnavailable(path, exc) from exc
 
     def close(self) -> None:
         self._connection.close()

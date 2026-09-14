@@ -6,3 +6,6 @@ __pycache__/
 .ruff_cache/
 *.sqlite3
 .data/
+
+# The directory the shipped example config writes its audit chain into.
+.turnstile/
