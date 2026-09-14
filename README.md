@@ -1,5 +1,9 @@
 # Turnstile
 
+[![CI](https://github.com/Lekh007/turnstile/actions/workflows/ci.yml/badge.svg)](https://github.com/Lekh007/turnstile/actions/workflows/ci.yml)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
+[![Checked with mypy --strict](https://img.shields.io/badge/mypy-strict-blue.svg)](https://mypy-lang.org/)
+
 **A policy, audit and budget gateway for MCP tool calls — where the default answer is no.**
 
 Every `tools/call` an agent makes passes through one controlled point. Turnstile decides whether
