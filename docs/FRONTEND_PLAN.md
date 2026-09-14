@@ -1,4 +1,4 @@
-# Turnstile Console — implementation plan
+# Turnstile Console - implementation plan
 
 A local-first web console for the people Turnstile governs on behalf of:
 the **approver** who must say yes to a held call, the **operator** who
@@ -17,7 +17,7 @@ Read these before anything else. Everything below follows from them.
 
 `ApprovalStore` holds pending approvals **in a Python dict, in the gateway
 process** (`src/turnstile/approvals.py`). The gateway runs as a stdio
-subprocess spawned by the MCP client. So today there is no way — none — for a
+subprocess spawned by the MCP client. So today there is no way - none - for a
 human to see a held call, let alone approve one.
 
 The docstring is honest about it:
@@ -41,7 +41,7 @@ From `Gateway.handle`:
 3. Gateway records `AWAITING_APPROVAL`, creates a pending request, and
    **returns immediately** with `Approval id: <id> (expires ...)`.
 4. Later the agent retries. `consume` now finds the granted approval, spends
-   it, and the call proceeds — audited with `rule_id="approval:<id>"`.
+   it, and the call proceeds - audited with `rule_id="approval:<id>"`.
 
 Nothing blocks. No websockets, no server push, no long-poll required. The
 console writes a decision; the next retry picks it up. A humble HTML form is
@@ -54,7 +54,7 @@ Two processes appending concurrently will interleave `previous_digest` reads
 and produce a chain that fails `verify()`.
 
 **Rule, non-negotiable: the web process opens the audit database read-only and
-the gateway remains the only writer.** Not by convention — enforced, by
+the gateway remains the only writer.** Not by convention - enforced, by
 opening with a `file:...?mode=ro` URI so a stray `INSERT` raises instead of
 corrupting. A console that breaks the chain it exists to display would
 discredit the entire project.
@@ -94,17 +94,17 @@ gateway when the approval is consumed.
 |---|---|
 | **Shared SQLite file** | **Chosen.** No daemon, survives restarts, works offline, matches the project's existing "embedded on purpose" stance. |
 | HTTP server on a thread inside the gateway | Rejected. The gateway lives and dies with the MCP client, and several clients would spawn several conflicting servers. |
-| A separate coordination daemon | Rejected. More processes, more failure modes, more to explain — for no capability the file does not already provide. |
+| A separate coordination daemon | Rejected. More processes, more failure modes, more to explain - for no capability the file does not already provide. |
 
 ### SQLite settings this requires
 
 Two processes on one file needs three pragmas, set once at open:
 
-- `journal_mode=WAL` — readers do not block the writer. Persists in the file.
-- `busy_timeout=5000` — a concurrent writer **waits** instead of raising
+- `journal_mode=WAL` - readers do not block the writer. Persists in the file.
+- `busy_timeout=5000` - a concurrent writer **waits** instead of raising
   `database is locked`. Without this you will see flaky failures under no real
   load at all.
-- `check_same_thread=False` — uvicorn serves on a worker thread.
+- `check_same_thread=False` - uvicorn serves on a worker thread.
 
 ---
 
@@ -118,7 +118,7 @@ Two processes on one file needs three pragmas, set once at open:
   same `mypy --strict`. A React app would need a second toolchain and a second
   CI job to reach the same confidence.
 - **You already know it.** Quarterline uses Jinja templates with vendored
-  `htmx.min.js` — same shape, and portfolio consistency is a small free win.
+  `htmx.min.js` - same shape, and portfolio consistency is a small free win.
 - **HTMX gives a live-feeling inbox** with `hx-get` + `hx-trigger="every 5s"`
   on one element. That is the entire real-time requirement.
 
@@ -128,7 +128,7 @@ differentiator is the governance substrate, and a SPA adds a build chain, a
 second lockfile and a CORS surface for little signal. Revisit only if a
 specific job description demands React.
 
-### Dependencies — keep the core install at two packages
+### Dependencies - keep the core install at two packages
 
 ```toml
 [project.optional-dependencies]
@@ -142,7 +142,7 @@ into a security-sensitive dependency tree.
 
 ---
 
-## 3. Security — a console over a policy gateway is a privilege surface
+## 3. Security - a console over a policy gateway is a privilege surface
 
 Anyone who reaches `/approvals` can authorise tool calls. Treat it that way.
 
@@ -152,14 +152,14 @@ Anyone who reaches `/approvals` can authorise tool calls. Treat it that way.
 | S2 | **The approver is derived from a verified token, never from a form field.** | If the user can type any name, separation of duties (rule 4) is decorative. Reuse `TokenPrincipalResolver`. |
 | S3 | **`approve` scope required to decide.** | `RoleMapping` already maps `directors → ledger, approve, write`. Wire it; do not invent a second permission model. |
 | S4 | **CSRF token on every POST.** | A page in another tab can POST to `127.0.0.1`. Localhost is not a trust boundary. |
-| S5 | **Render `arguments_redacted` only.** | The console must be unable to leak what redaction removed — it reads the stored record, which never held the secret. |
+| S5 | **Render `arguments_redacted` only.** | The console must be unable to leak what redaction removed - it reads the stored record, which never held the secret. |
 | S6 | **Audit DB opened read-only.** | §0.3. Enforced by the connection URI. |
 | S7 | **No token, key or secret ever rendered into HTML.** | Includes error pages and debug output. |
 
 ### Separation of duties in a single-user local setup
 
 Rule 4 says the requester may not approve their own call. Locally you are both.
-Do not weaken the rule — demonstrate it:
+Do not weaken the rule - demonstrate it:
 
 - Gateway config: `principal.subject = "priya"` (the agent acts as Priya).
 - Console config: a **different** principal, `subject = "dana"`, with the
@@ -188,20 +188,20 @@ exists**. `/shadow` in particular is close to free: `ShadowReport` already
 carries `newly_denied`, `newly_allowed`, `newly_held`, `unused_rules`,
 `unevaluable` and `rule_hits`, and `summary()` already prose-formats it.
 
-### `/approvals` — the screen that matters
+### `/approvals` - the screen that matters
 
 Each pending hold shows:
 
-- **Who** — `requested_by`, `tenant`
-- **What** — `server` / `tool`, arguments pretty-printed (redacted)
-- **Why held** — the rule id and its reason, taken from the audit record
-- **When it expires** — a live countdown; an expired hold cannot be approved
+- **Who** - `requested_by`, `tenant`
+- **What** - `server` / `tool`, arguments pretty-printed (redacted)
+- **Why held** - the rule id and its reason, taken from the audit record
+- **When it expires** - a live countdown; an expired hold cannot be approved
 - **Approve** / **Reject**, each requiring a short reason
 
 Design notes:
 - Show the **digest prefix**, and state that the approval covers *this exact
   call*. The whole value proposition is on that line.
-- After deciding, the card moves to a "Decided" list with who and when —
+- After deciding, the card moves to a "Decided" list with who and when -
   the approver must be able to see what they just did.
 - Empty state is not "no data": it is *"Nothing is waiting on you."*
 
@@ -209,13 +209,13 @@ Design notes:
 
 ## 5. Build order
 
-### Phase 0 — Scaffolding (½ session)
+### Phase 0 - Scaffolding (½ session)
 - `web` optional dependency group; `src/turnstile/web/` package.
 - `turnstile --config … console --port 8787` subcommand.
 - One route (`/healthz`), one test, `mypy --strict` clean, CI green.
 - **Done when:** the server starts, the test passes, nothing else changed.
 
-### Phase 1 — Persist approvals ⚠️ *the blocker* (1–2 sessions)
+### Phase 1 - Persist approvals ⚠️ *the blocker* (1–2 sessions)
 Make the three choices the docstring deferred:
 - **Where:** the same SQLite file as the audit log, table `approvals`.
 - **Lifetime:** rows persist; `expires_at` already governs usability. Add
@@ -226,7 +226,7 @@ Make the three choices the docstring deferred:
 
 Work:
 - `SqliteApprovalStore` with the same interface as the current in-memory one.
-  Keep the in-memory implementation for tests — make both satisfy a Protocol.
+  Keep the in-memory implementation for tests - make both satisfy a Protocol.
 - WAL + `busy_timeout` at open.
 - Wire `TurnstileConfig` so the gateway and console resolve the same path.
 
@@ -240,19 +240,19 @@ Work:
 
 **Done when:** a decision written by one process is consumed by another.
 
-### Phase 2 — Audit query surface (½–1 session)
+### Phase 2 - Audit query surface (½–1 session)
 `records()` is oldest-first, unbounded, tenant-only. A console cannot page
 100k rows to show 50. Add:
 - `records(..., newest_first=True, limit=N, offset=M)`
 - filters: `outcome`, `effect`, `tool`, `subject`, `rule_id`, time range
 - `record(sequence)` for the detail page
 - `counts_by_outcome(tenant)` for the dashboard
-- `open_readonly(path)` — the enforced read-only connection (§0.3)
+- `open_readonly(path)` - the enforced read-only connection (§0.3)
 
 **Tests:** filters compose; `limit`/`offset` page without gaps or repeats; a
 write attempt through the read-only connection **raises**.
 
-### Phase 3 — Approvals inbox (1–2 sessions)
+### Phase 3 - Approvals inbox (1–2 sessions)
 The money screen. Base layout, inbox, decide endpoints, CSRF, scope gate,
 HTMX 5-second refresh.
 
@@ -263,25 +263,25 @@ rejected; a principal without `approve` gets 403.
 **Done when:** you can run the gateway, trigger a held call from a real MCP
 client, approve it in the browser, and watch the retry succeed.
 
-### Phase 4 — Activity feed + record detail (1 session)
+### Phase 4 - Activity feed + record detail (1 session)
 Newest-first table, filter bar, detail page showing digest, `previous_digest`
 and chain position.
 
 **Test:** the whole surface runs against a populated DB and `verify()` still
-passes afterwards — proof the console never wrote to the chain.
+passes afterwards - proof the console never wrote to the chain.
 
-### Phase 5 — Chain integrity + whoami (½ session)
+### Phase 5 - Chain integrity + whoami (½ session)
 `/chain` runs `verify()` and reports intact + head digest, or names the first
 failing sequence. `/whoami` renders `explain()`, including
-`groups_unmapped` — the commonest identity failure is an accepted token with
+`groups_unmapped` - the commonest identity failure is an accepted token with
 fewer scopes than expected, which looks exactly like a policy bug.
 
-### Phase 6 — Shadow mode (1 session)
+### Phase 6 - Shadow mode (1 session)
 Paste or upload a candidate policy; render the diff: newly denied / held /
 allowed, unused rules, and **unevaluable records with the reason**. Do not
-hide the unevaluable count — it is the honest part of the feature.
+hide the unevaluable count - it is the honest part of the feature.
 
-### Phase 7 — Polish and demo (1 session)
+### Phase 7 - Polish and demo (1 session)
 Dark mode, empty states, README screenshots, and a scripted three-user demo:
 Priya blocked, Sam allowed, Dana approves a hold. Record it.
 
@@ -345,5 +345,5 @@ in, let the template only render.
 Phase 1. Not the UI.
 
 Until approvals are persisted, every screen is a mock. Once they are, the
-inbox is a form over a table — and the feature the README already advertises
+inbox is a form over a table - and the feature the README already advertises
 becomes real for the first time.

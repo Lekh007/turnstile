@@ -4,11 +4,11 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 [![Checked with mypy --strict](https://img.shields.io/badge/mypy-strict-blue.svg)](https://mypy-lang.org/)
 
-**A policy, audit and budget gateway for MCP tool calls — where the default answer is no.**
+**A policy, audit and budget gateway for MCP tool calls - where the default answer is no.**
 
 Every `tools/call` an agent makes passes through one controlled point. Turnstile decides whether
 it is permitted, whether the tenant can afford it, and records what happened in a hash-chained
-log — before the upstream server is ever contacted.
+log - before the upstream server is ever contacted.
 
 It is a proxy, not a framework. Point an MCP client at Turnstile instead of at the real servers
 and nothing else changes.
@@ -19,17 +19,17 @@ Gartner expects **more than 40% of agentic AI projects to be cancelled by the en
 the reasons given are escalating costs, unclear business value, and inadequate risk controls. Two
 of those three are controls that don't exist yet:
 
-- *"What is this agent actually allowed to do?"* — usually answered by a system prompt, which is a
+- *"What is this agent actually allowed to do?"* - usually answered by a system prompt, which is a
   request, not a control.
-- *"What did it do last Tuesday?"* — usually answered by logs the agent's own process wrote.
-- *"What did that cost, and what stops it?"* — usually answered by a dashboard nobody watches.
+- *"What did it do last Tuesday?"* - usually answered by logs the agent's own process wrote.
+- *"What did that cost, and what stops it?"* - usually answered by a dashboard nobody watches.
 
 Turnstile answers all three mechanically. Policy is a data file, not a prompt. The audit log is
 tamper-evident and written by the gateway, not the agent. The budget is a gate, not an alert.
 
 ## The four decisions that define it
 
-**Default deny, stated out loud.** A call matching no rule is denied, and the decision says so —
+**Default deny, stated out loud.** A call matching no rule is denied, and the decision says so -
 `rule_id` is `"<implicit-default-deny>"`, never blank. There is no configuration that makes the
 unmatched case allow. A governance tool whose failure mode is *permit* is not a governance tool.
 
@@ -71,14 +71,14 @@ Policy(
 ```
 
 `SELECT 1` reaches the database. `DROP TABLE users` does not, and the agent is told which rule
-stopped it. A write to `staging-db` matches nothing and is denied by default — which is the point:
+stopped it. A write to `staging-db` matches nothing and is denied by default - which is the point:
 adding a server does not silently grant access to it.
 
 ## The audit log
 
 Append-only and hash-chained: each record carries the digest of the one before it, and its own
 digest covers both its content and that link. Altering or deleting any record breaks every digest
-after it, and `verify()` names the first sequence that fails — so an operator learns *where* the
+after it, and `verify()` names the first sequence that fails - so an operator learns *where* the
 log was altered, not merely that it was.
 
 ```python
@@ -112,12 +112,12 @@ later that a result was not altered.
 
 Built against the **2026-07-28** MCP revision, which matters in three specific ways:
 
-- MCP is now explicitly a **stateless** protocol — nothing may be inferred from a connection. That
+- MCP is now explicitly a **stateless** protocol - nothing may be inferred from a connection. That
   suits a proxy: there is no handshake to remember. It also means every request must carry
   `io.modelcontextprotocol/protocolVersion` and `io.modelcontextprotocol/clientCapabilities` in
   `_meta`, and Turnstile rejects a request missing either with `-32602`, as the spec requires.
 - Results carry `resultType`. An absent one means a server on an earlier revision and is read as
-  `"complete"` — defaulting the other way would make every older server look like it was asking
+  `"complete"` - defaulting the other way would make every older server look like it was asking
   for more input.
 - Filtering `tools/list` by policy is explicitly permitted: the tool set "MAY vary by the
   authorization presented on the request". Filtering means a model is never shown a tool it would
@@ -151,7 +151,7 @@ python -m turnstile --config turnstile.json
 A fuller example, with redaction, budgets and a scope-gated write rule, is in
 [`examples/turnstile.json`](examples/turnstile.json).
 
-Tools are exposed as `<server>.<tool>` — the specification asks aggregating proxies to
+Tools are exposed as `<server>.<tool>` - the specification asks aggregating proxies to
 disambiguate, since two servers may each expose a `search`. Routing splits on the *first* dot, so
 `admin.tools.list` (itself a legal tool name) survives being prefixed.
 
@@ -164,14 +164,14 @@ call      -> ALLOWED: files:read_file:{"path": "/tmp/notes.txt"}
 call      -> BLOCKED: Refused by Turnstile policy [deletes-denied]: Agents do not delete files.
 ```
 
-`files.delete_file` is absent from the tool list because policy denies it outright — the model is
+`files.delete_file` is absent from the tool list because policy denies it outright - the model is
 never shown a tool it would only be refused for using. A tool that is *conditionally* denied still
 appears, because argument predicates cannot be judged without arguments, and hiding it would deny a
 capability that is legal for some inputs.
 
 ## Who the agent is acting for
 
-An agent must never hold more authority than the person it acts for — and usually holds less.
+An agent must never hold more authority than the person it acts for - and usually holds less.
 
 Every company already has an identity provider that knows who is in which group, so Turnstile
 authenticates nobody itself. It verifies a signed OIDC token, maps the groups inside it onto the
@@ -208,14 +208,14 @@ Three real people, three real signed tokens, **one unchanged policy**:
 Two properties are enforced in code rather than left to configuration:
 
 - **The signature is always verified.** There is no flag that disables it, and `alg: none` cannot
-  even be configured — it is signature stripping, not an algorithm. Expiry, audience and issuer are
+  even be configured - it is signature stripping, not an algorithm. Expiry, audience and issuer are
   named explicitly rather than left to library defaults, so a future default change cannot quietly
   switch one off.
 - **An unmapped group grants nothing.** Default deny applied to identity: creating a group at the
   IdP is never accidentally a grant inside Turnstile.
 
 `turnstile whoami` exists because the commonest identity failure is not a rejected token but an
-accepted one that yields fewer scopes than expected — which looks exactly like a policy bug until
+accepted one that yields fewer scopes than expected - which looks exactly like a policy bug until
 you can see the mapping:
 
 ```json
@@ -225,7 +225,7 @@ you can see the mapping:
 ```
 
 Credentials come from the environment (`TURNSTILE_JWT_KEY`, `TURNSTILE_ID_TOKEN`), never from the
-config file — and on stdio that is what the specification points at, since the transport carries no
+config file - and on stdio that is what the specification points at, since the transport carries no
 authorization of its own. If identity is configured and the token is missing or invalid, the
 gateway **refuses to start** rather than falling back to the config-file principal. Falling back
 would mean granting access on the strength of a file instead of an identity provider, which is the
@@ -236,17 +236,17 @@ exact failure this layer exists to prevent.
 A `require_approval` decision parks the call and returns an approval id. Four rules keep an
 approval narrow, and each closes a way it could become more authority than the approver intended:
 
-- **Bound to the exact call** — one server, one tool, one specific set of arguments, matched by
+- **Bound to the exact call** - one server, one tool, one specific set of arguments, matched by
   digest. Approving `delete /tmp/scratch` must never authorise `delete /etc/passwd`.
-- **Single use** — consumed the moment the call proceeds, so one approved deletion does not
+- **Single use** - consumed the moment the call proceeds, so one approved deletion does not
   authorise unlimited deletions.
-- **Expires** — a request approved on Monday should not still execute on Friday.
-- **The requester cannot approve themselves** — and this one matters here specifically, because the
+- **Expires** - a request approved on Monday should not still execute on Friday.
+- **The requester cannot approve themselves** - and this one matters here specifically, because the
   requester is usually an agent acting *as* a human. Without it, "ask a human" collapses into the
   agent asking itself.
 
 The audit log then records `approval:<id>` and the approver's name as the reason the call was
-permitted — not a policy rule, because a rule is not what permitted it.
+permitted - not a policy rule, because a rule is not what permitted it.
 
 ## Testing a policy change before shipping it
 
@@ -266,7 +266,7 @@ Evaluated 431 audited call(s) against the candidate policy.
 ```
 
 That last line is the honest part. Audit records store arguments *after* redaction, so a rule
-matching on a redacted path cannot be scored against history — the value it needs was deliberately
+matching on a redacted path cannot be scored against history - the value it needs was deliberately
 never written down. Reporting those as unevaluable rather than assuming an answer is the difference
 between a report an operator can act on and one that misleads them exactly once, expensively.
 Scopes are likewise absent from audit records, so a candidate rule selecting on `require_scopes`
@@ -278,7 +278,7 @@ will not score faithfully; that limit is stated here rather than papered over.
 the failure is disproportionate: one stray banner, warning or traceback makes the client fail to
 parse the stream, and the error it reports points at JSON rather than at whatever printed. Every
 diagnostic here goes to stderr, which the spec explicitly permits and tells clients not to read as
-failure. A test drives the proxy through a scripted session — including a garbage input line — and
+failure. A test drives the proxy through a scripted session - including a garbage input line - and
 asserts every single stdout line parses as a valid MCP message.
 
 ## Run the gates
@@ -307,8 +307,8 @@ decision path, the **stdio transport** with multi-server aggregation and prefix 
   what makes this demonstrable; HTTP is what a shared multi-user deployment would need, along with
   the authorization framework that comes with it.
 - **Approval delivery through the protocol.** Approvals are granted out of band today. The natural
-  fit is MCP's own `InputRequiredResult` and elicitation — the gateway asking the operator through
-  the protocol it is already speaking — rather than a separate channel.
+  fit is MCP's own `InputRequiredResult` and elicitation - the gateway asking the operator through
+  the protocol it is already speaking - rather than a separate channel.
 - **A durable approval queue.** Deliberately in-memory: a persisted queue needs a defined lifetime
   and reset policy, and choosing one silently would mean approvals behaving differently after a
   restart than before it.
