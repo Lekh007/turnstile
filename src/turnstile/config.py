@@ -123,6 +123,14 @@ class TurnstileConfig(BaseModel):
         default=":memory:",
         description="Where the audit chain is written. The in-memory default is deliberate: a durable log is a deployment decision, and silently writing one into a user's home directory is not a decision to make on their behalf.",
     )
+    approvals_path: str | None = Field(
+        default=None,
+        description=(
+            "Where the approval queue lives. Unset follows `audit_path`: a durable audit file carries the "
+            "approvals table too (one store file, two tables, chain untouched by approval writes), and an "
+            "in-memory audit means an in-memory queue. Set it explicitly to split them."
+        ),
+    )
 
     def resolve_principal(self) -> Principal:
         """The principal this gateway acts for.

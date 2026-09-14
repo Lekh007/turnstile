@@ -20,6 +20,23 @@ executable on Friday; by then nobody remembers the context that made it fine.
 the reason it matters here specifically: the requester is frequently an agent
 acting *as* the requesting human, so without this rule "ask a human" collapses
 into the agent asking itself.
+
+The queue is durable, and the three decisions behind that are now explicit:
+
+**Lifetime** is the unchanged TTL. Durability does not extend it; an approval
+that would have expired before the restart still expires.
+
+**Reset policy: there is none.** Rows survive a restart and expiry is an
+explicit state transition, never a silent wipe. That is the point of
+persistence: the gateway can die while a call is held, a human can decide in
+its absence, and the agent's next retry finds the decision waiting.
+
+**Where it lives:** the same SQLite file as the audit chain, in a separate
+table. Approval writes never touch the chain. State changes are compare-and-set
+(`UPDATE ... WHERE state = <expected>`), so a gateway and a console deciding
+over one file cannot double-decide a request or consume one approval twice --
+the loser of the race sees `state` moved on and reports it, rather than both
+succeeding.
 """
 
 from __future__ import annotations
@@ -27,8 +44,10 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
+import sqlite3
 from datetime import datetime, timedelta
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -36,6 +55,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from .domain import ToolCall, utcnow
 
 DEFAULT_TTL_SECONDS = 900
+
+IN_MEMORY = ":memory:"
+"""Same magic path as the audit log: a queue that is not kept."""
 
 
 class ApprovalState(StrEnum):
@@ -48,6 +70,23 @@ class ApprovalState(StrEnum):
 
 class ApprovalError(Exception):
     """An approval could not be granted or used, with a reason safe to show."""
+
+
+class ApprovalStoreUnavailable(Exception):
+    """The approval store could not be opened.
+
+    Raised at startup rather than turned into a degraded mode: a configuration
+    that asks for durable approvals and cannot have them should stop the
+    operator's day loudly, not quietly hold calls in a queue that vanishes.
+    """
+
+    def __init__(self, path: Path | str, reason: BaseException) -> None:
+        super().__init__(
+            f"cannot open the approval store at {str(path)!r}: {reason}. "
+            f"Point 'approvals_path' at a writable location, or use {IN_MEMORY!r} "
+            "for a queue that is not kept."
+        )
+        self.path = str(path)
 
 
 def call_digest(call: ToolCall) -> str:
@@ -88,19 +127,79 @@ class ApprovalRequest(BaseModel):
         return (now or utcnow()) >= self.expires_at
 
 
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS approvals (
+    id                 TEXT PRIMARY KEY,
+    digest             TEXT NOT NULL,
+    tenant             TEXT NOT NULL,
+    requested_by       TEXT NOT NULL,
+    server             TEXT NOT NULL,
+    tool               TEXT NOT NULL,
+    arguments_redacted TEXT NOT NULL,
+    requested_at       TEXT NOT NULL,
+    expires_at         TEXT NOT NULL,
+    state              TEXT NOT NULL,
+    decided_by         TEXT,
+    decided_at         TEXT,
+    reason             TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS approvals_state_idx ON approvals (state, tenant);
+CREATE INDEX IF NOT EXISTS approvals_digest_idx ON approvals (digest, tenant, state);
+"""
+
+
+def _record_from_row(row: sqlite3.Row) -> ApprovalRequest:
+    return ApprovalRequest(
+        id=str(row["id"]),
+        digest=str(row["digest"]),
+        tenant=str(row["tenant"]),
+        requested_by=str(row["requested_by"]),
+        server=str(row["server"]),
+        tool=str(row["tool"]),
+        arguments_redacted=json.loads(str(row["arguments_redacted"])),
+        requested_at=datetime.fromisoformat(str(row["requested_at"])),
+        expires_at=datetime.fromisoformat(str(row["expires_at"])),
+        state=ApprovalState(str(row["state"])),
+        decided_by=row["decided_by"] if row["decided_by"] is None else str(row["decided_by"]),
+        decided_at=row["decided_at"] if row["decided_at"] is None else datetime.fromisoformat(str(row["decided_at"])),
+        reason=str(row["reason"]),
+    )
+
+
 class ApprovalStore:
-    """In-memory pending approvals.
+    """SQLite-backed approval queue. Embedded on purpose, like the audit log:
+    one file the gateway writes and a future console reads, not a database
+    cluster to stand up before an agent may ask for permission."""
 
-    Not persisted, deliberately. A durable approval queue needs a defined
-    lifetime, a reset policy and somewhere trustworthy to live; choosing one
-    silently would mean approvals behaving differently after a restart than
-    before it. The audit log is the durable record of what was asked and what
-    was decided -- this is the live queue.
-    """
-
-    def __init__(self, *, ttl_seconds: int = DEFAULT_TTL_SECONDS) -> None:
+    def __init__(self, path: Path | str = IN_MEMORY, *, ttl_seconds: int = DEFAULT_TTL_SECONDS) -> None:
         self._ttl = timedelta(seconds=ttl_seconds)
-        self._requests: dict[str, ApprovalRequest] = {}
+        if str(path) != IN_MEMORY:
+            try:
+                Path(path).parent.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise ApprovalStoreUnavailable(path, exc) from exc
+        try:
+            self._connection = sqlite3.connect(str(path), isolation_level=None, check_same_thread=False)
+            self._connection.row_factory = sqlite3.Row
+            if str(path) != IN_MEMORY:
+                # Two processes share this file (the gateway holds, a console
+                # decides). WAL keeps a reader from blocking the writer, and a
+                # busy timeout turns the rare collision into a wait instead of
+                # an "database is locked" error under no real load at all.
+                self._connection.execute("PRAGMA journal_mode=WAL")
+                self._connection.execute("PRAGMA busy_timeout=5000")
+            self._connection.executescript(_SCHEMA)
+        except sqlite3.Error as exc:
+            raise ApprovalStoreUnavailable(path, exc) from exc
+
+    def close(self) -> None:
+        self._connection.close()
+
+    def __enter__(self) -> ApprovalStore:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
 
     def request(self, call: ToolCall, *, arguments_redacted: dict[str, Any]) -> ApprovalRequest:
         """Record that a call is waiting for a human.
@@ -121,31 +220,65 @@ class ApprovalStore:
             requested_at=now,
             expires_at=now + self._ttl,
         )
-        self._requests[record.id] = record
+        self._connection.execute(
+            "INSERT INTO approvals (id, digest, tenant, requested_by, server, tool, arguments_redacted,"
+            " requested_at, expires_at, state, decided_by, decided_at, reason)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, '')",
+            (
+                record.id,
+                record.digest,
+                record.tenant,
+                record.requested_by,
+                record.server,
+                record.tool,
+                json.dumps(record.arguments_redacted, default=str),
+                record.requested_at.isoformat(),
+                record.expires_at.isoformat(),
+                record.state.value,
+            ),
+        )
         return record
 
     def get(self, approval_id: str) -> ApprovalRequest | None:
-        return self._requests.get(approval_id)
+        row = self._connection.execute("SELECT * FROM approvals WHERE id = ?", (approval_id,)).fetchone()
+        return None if row is None else _record_from_row(row)
 
     def pending(self, *, tenant: str | None = None) -> list[ApprovalRequest]:
+        """Live holds: PENDING and not yet past their expiry.
+
+        Expiry is applied here rather than only by a sweep, so a caller never
+        sees a hold it could usefully act on that has in fact lapsed. Marking
+        the row EXPIRED is deliberate bookkeeping, not garbage collection: an
+        auditor can see that a hold lapsed unapproved.
+        """
         now = utcnow()
-        return [
-            record
-            for record in self._requests.values()
-            if record.state is ApprovalState.PENDING
-            and not record.is_expired(now=now)
-            and (tenant is None or record.tenant == tenant)
-        ]
+        if tenant is None:
+            rows = self._connection.execute(
+                "SELECT * FROM approvals WHERE state = ? ORDER BY requested_at", (ApprovalState.PENDING.value,)
+            ).fetchall()
+        else:
+            rows = self._connection.execute(
+                "SELECT * FROM approvals WHERE state = ? AND tenant = ? ORDER BY requested_at",
+                (ApprovalState.PENDING.value, tenant),
+            ).fetchall()
+        live: list[ApprovalRequest] = []
+        for row in rows:
+            record = _record_from_row(row)
+            if record.is_expired(now=now):
+                self._expire(record)
+                continue
+            live.append(record)
+        return live
 
     def decide(self, approval_id: str, *, approver: str, approve: bool, reason: str = "") -> ApprovalRequest:
-        record = self._requests.get(approval_id)
-        if record is None:
+        row = self._connection.execute("SELECT * FROM approvals WHERE id = ?", (approval_id,)).fetchone()
+        if row is None:
             raise ApprovalError(f"no such approval: {approval_id!r}")
+        record = _record_from_row(row)
         if record.state is not ApprovalState.PENDING:
             raise ApprovalError(f"approval {approval_id!r} is already {record.state.value}")
         if record.is_expired():
-            expired = record.model_copy(update={"state": ApprovalState.EXPIRED})
-            self._requests[approval_id] = expired
+            self._expire(record)
             raise ApprovalError(f"approval {approval_id!r} expired at {record.expires_at.isoformat()}")
         if approver == record.requested_by:
             raise ApprovalError(
@@ -153,16 +286,26 @@ class ApprovalStore:
                 "an agent acting as the requester must not be able to approve itself"
             )
 
-        decided = record.model_copy(
+        decided_at = utcnow()
+        state = ApprovalState.APPROVED if approve else ApprovalState.REJECTED
+        # Compare-and-set on the state: if another process decided this same
+        # request while we checked it, the UPDATE matches nothing and the loser
+        # reports the race instead of both decisions landing.
+        cursor = self._connection.execute(
+            "UPDATE approvals SET state = ?, decided_by = ?, decided_at = ?, reason = ?"
+            " WHERE id = ? AND state = ?",
+            (state.value, approver, decided_at.isoformat(), reason, approval_id, ApprovalState.PENDING.value),
+        )
+        if cursor.rowcount != 1:
+            raise ApprovalError(f"approval {approval_id!r} is already decided")
+        return record.model_copy(
             update={
-                "state": ApprovalState.APPROVED if approve else ApprovalState.REJECTED,
+                "state": state,
                 "decided_by": approver,
-                "decided_at": utcnow(),
+                "decided_at": decided_at,
                 "reason": reason,
             }
         )
-        self._requests[approval_id] = decided
-        return decided
 
     def consume(self, call: ToolCall) -> ApprovalRequest | None:
         """Find and spend an approval covering exactly this call.
@@ -173,23 +316,41 @@ class ApprovalStore:
         """
         digest = call_digest(call)
         now = utcnow()
-        for approval_id, record in self._requests.items():
-            if record.state is not ApprovalState.APPROVED:
-                continue
-            if record.digest != digest or record.tenant != call.principal.tenant:
-                continue
+        rows = self._connection.execute(
+            "SELECT * FROM approvals WHERE digest = ? AND tenant = ? AND state = ? ORDER BY requested_at",
+            (digest, call.principal.tenant, ApprovalState.APPROVED.value),
+        ).fetchall()
+        for row in rows:
+            record = _record_from_row(row)
             if record.is_expired(now=now):
-                self._requests[approval_id] = record.model_copy(update={"state": ApprovalState.EXPIRED})
+                self._expire(record)
                 continue
-            self._requests[approval_id] = record.model_copy(update={"state": ApprovalState.CONSUMED})
-            return record
+            spent = self._connection.execute(
+                "UPDATE approvals SET state = ? WHERE id = ? AND state = ?",
+                (ApprovalState.CONSUMED.value, record.id, ApprovalState.APPROVED.value),
+            )
+            if spent.rowcount == 1:
+                return record.model_copy(update={"state": ApprovalState.CONSUMED})
+            # Another process consumed this one between the SELECT and the
+            # UPDATE; try the next approved row for the same call.
+            continue
         return None
 
     def purge_expired(self) -> int:
-        now = utcnow()
-        purged = 0
-        for approval_id, record in list(self._requests.items()):
-            if record.state in {ApprovalState.PENDING, ApprovalState.APPROVED} and record.is_expired(now=now):
-                self._requests[approval_id] = record.model_copy(update={"state": ApprovalState.EXPIRED})
-                purged += 1
-        return purged
+        cursor = self._connection.execute(
+            "UPDATE approvals SET state = ?"
+            " WHERE state IN (?, ?) AND expires_at <= ?",
+            (
+                ApprovalState.EXPIRED.value,
+                ApprovalState.PENDING.value,
+                ApprovalState.APPROVED.value,
+                utcnow().isoformat(),
+            ),
+        )
+        return cursor.rowcount
+
+    def _expire(self, record: ApprovalRequest) -> None:
+        self._connection.execute(
+            "UPDATE approvals SET state = ? WHERE id = ? AND state = ?",
+            (ApprovalState.EXPIRED.value, record.id, record.state.value),
+        )

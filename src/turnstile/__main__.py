@@ -60,6 +60,7 @@ def serve(config: TurnstileConfig) -> int:
         log(f"[turnstile] started upstream {name!r}: {server.command}")
 
     audit_log = AuditLog(config.audit_path)
+    approvals_path = config.approvals_path if config.approvals_path is not None else config.audit_path
     proxy = Proxy(
         registry=ToolRegistry(dict(upstreams)),
         policy=config.policy,
@@ -67,7 +68,7 @@ def serve(config: TurnstileConfig) -> int:
         principal=principal,
         budget=config.budget.to_budget() if config.budget else None,
         ledger=BudgetLedger(),
-        approvals=ApprovalStore(ttl_seconds=config.approval_ttl_seconds),
+        approvals=ApprovalStore(approvals_path, ttl_seconds=config.approval_ttl_seconds),
     )
 
     log(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from typing import Any
 
 import pytest
@@ -129,14 +130,14 @@ class TestExpiryAndRejection:
         with pytest.raises(ApprovalError, match="expired"):
             store.decide(pending.id, approver=APPROVER, approve=True)
 
-    def test_an_approval_that_expires_after_granting_cannot_be_consumed(self) -> None:
-        store = ApprovalStore(ttl_seconds=120)
+    def test_an_approval_that_expires_after_granting_cannot_be_consumed(self, tmp_path) -> None:
+        store = ApprovalStore(tmp_path / "queue.sqlite3", ttl_seconds=120)
         pending = store.request(call(), arguments_redacted={})
         store.decide(pending.id, approver=APPROVER, approve=True)
-        # Force expiry without sleeping.
-        record = store.get(pending.id)
-        assert record is not None
-        store._requests[pending.id] = record.model_copy(update={"expires_at": record.requested_at})
+        # Force expiry without sleeping: rewind the stored expiry into the
+        # past, which is exactly the row the clock would have changed.
+        with sqlite3.connect(tmp_path / "queue.sqlite3") as conn:
+            conn.execute("UPDATE approvals SET expires_at = ?", (pending.requested_at.isoformat(),))
         assert store.consume(call()) is None
 
     def test_a_rejected_request_is_not_consumable(self) -> None:
@@ -257,3 +258,106 @@ class TestThroughTheGateway:
         assert gateway.handle("files", request_message("anything"), REQUESTER).outcome is Outcome.AWAITING_APPROVAL
         assert transport.calls == []
         log.close()
+
+
+class TestDurability:
+    """The queue survives the process that created it.
+
+    A hold outliving a gateway restart is the entire point of persistence:
+    a human can decide while the gateway is down, and the agent's next retry
+    finds the decision waiting. Expiry is the only thing that clears a live
+    hold -- never a restart.
+    """
+
+    def test_a_decision_survives_a_reopen(self, tmp_path):  # type: ignore[no-untyped-def]
+        store = ApprovalStore(tmp_path / "queue.sqlite3")
+        pending = store.request(call(arguments={"path": "/tmp/scratch"}), arguments_redacted={})
+        store.decide(pending.id, approver=APPROVER, approve=True, reason="checked the path")
+        store.close()
+
+        reopened = ApprovalStore(tmp_path / "queue.sqlite3")
+        decided = reopened.get(pending.id)
+        assert decided is not None
+        assert decided.state is ApprovalState.APPROVED
+        assert decided.decided_by == APPROVER
+        assert decided.reason == "checked the path"
+        assert reopened.consume(call(arguments={"path": "/tmp/scratch"})) is not None
+        reopened.close()
+
+    def test_a_pending_hold_survives_a_reopen_and_can_still_be_decided(self, tmp_path):  # type: ignore[no-untyped-def]
+        store = ApprovalStore(tmp_path / "queue.sqlite3")
+        pending = store.request(call(), arguments_redacted={"path": "/tmp/scratch"})
+        store.close()
+
+        reopened = ApprovalStore(tmp_path / "queue.sqlite3")
+        live = reopened.pending()
+        assert [p.id for p in live] == [pending.id]
+
+        reopened.decide(pending.id, approver=APPROVER, approve=True)
+        assert reopened.consume(call()) is not None
+        reopened.close()
+
+    def test_consumption_is_single_use_across_a_reopen(self, tmp_path):  # type: ignore[no-untyped-def]
+        store = ApprovalStore(tmp_path / "queue.sqlite3")
+        pending = store.request(call(), arguments_redacted={})
+        store.decide(pending.id, approver=APPROVER, approve=True)
+        store.close()
+
+        first = ApprovalStore(tmp_path / "queue.sqlite3")
+        assert first.consume(call()) is not None
+        assert first.consume(call()) is None
+        first.close()
+
+        second = ApprovalStore(tmp_path / "queue.sqlite3")
+        assert second.consume(call()) is None
+        second.close()
+
+    def test_self_approval_is_still_refused_on_a_durable_store(self, tmp_path):  # type: ignore[no-untyped-def]
+        store = ApprovalStore(tmp_path / "queue.sqlite3")
+        pending = store.request(call(), arguments_redacted={})
+        with pytest.raises(ApprovalError, match="may not also approve"):
+            store.decide(pending.id, approver=REQUESTER.subject, approve=True)
+        store.close()
+
+    def test_an_expired_hold_is_not_revived_by_a_reopen(self, tmp_path):  # type: ignore[no-untyped-def]
+        store = ApprovalStore(tmp_path / "queue.sqlite3", ttl_seconds=0)
+        store.request(call(), arguments_redacted={})
+        store.close()
+
+        reopened = ApprovalStore(tmp_path / "queue.sqlite3", ttl_seconds=0)
+        assert reopened.pending() == []
+        assert reopened.consume(call()) is None
+        reopened.close()
+
+    def test_purge_marks_expired_holds_without_losing_them(self, tmp_path):  # type: ignore[no-untyped-def]
+        store = ApprovalStore(tmp_path / "queue.sqlite3", ttl_seconds=0)
+        pending = store.request(call(), arguments_redacted={})
+        assert store.purge_expired() >= 1
+        assert store.purge_expired() == 0  # already EXPIRED: nothing left to sweep
+
+        swept = store.get(pending.id)
+        assert swept is not None and swept.state is ApprovalState.EXPIRED
+        store.close()
+
+    def test_approvals_share_the_audit_file_without_touching_the_chain(self, tmp_path):  # type: ignore[no-untyped-def]
+        # The console plan's architecture: one store file, two tables. Approval
+        # writes must leave the hash chain exactly as verifiable as before.
+        path = tmp_path / "turnstile.sqlite3"
+        log = AuditLog(path)
+        store = ApprovalStore(path)
+
+        pending = store.request(call(), arguments_redacted={})
+        store.decide(pending.id, approver=APPROVER, approve=True)
+        assert store.consume(call()) is not None
+
+        assert log.verify() == 0  # empty chain, still intact
+        log.close()
+        store.close()
+
+        # Reopening both over the same file keeps working.
+        log_again = AuditLog(path)
+        store_again = ApprovalStore(path)
+        assert log_again.verify() == 0
+        assert store_again.pending() == []
+        log_again.close()
+        store_again.close()
